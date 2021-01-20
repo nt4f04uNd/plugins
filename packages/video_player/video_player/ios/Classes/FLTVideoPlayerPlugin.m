@@ -200,7 +200,7 @@ static inline CGFloat radiansToDegrees(CGFloat radians) {
   AVAsset* asset = [item asset];
   CMTimeRange timeRange = CMTimeRangeMake(CMTimeMake(0, 1), CMTimeMake(asset.duration.value, asset.duration.timescale));
   AVMutableComposition *mutableComposition = [AVMutableComposition composition];
-  for (int i = 0; i < 10000; i++) {
+  for (int i = 0; i < 500; i++) {
       [mutableComposition insertTimeRange:timeRange ofAsset:asset atTime:mutableComposition.duration error:nil];
   }
   item = [[AVPlayerItem alloc] initWithAsset:mutableComposition];
