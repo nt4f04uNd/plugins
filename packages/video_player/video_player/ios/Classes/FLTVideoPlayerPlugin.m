@@ -198,6 +198,14 @@ static inline CGFloat radiansToDegrees(CGFloat radians) {
   _disposed = false;
 
   AVAsset* asset = [item asset];
+  CMTimeRange timeRange = CMTimeRangeMake(CMTimeMake(0, 1), CMTimeMake(asset.duration.value, asset.duration.timescale));
+  AVMutableComposition *mutableComposition = [AVMutableComposition composition];
+  for (int i = 0; i < 10000; i++) {
+      [mutableComposition insertTimeRange:timeRange ofAsset:asset atTime:mutableComposition.duration error:nil];
+  }
+  item = [[AVPlayerItem alloc] initWithAsset:mutableComposition];
+  asset = [item asset];
+
   void (^assetCompletionHandler)(void) = ^{
     if ([asset statusOfValueForKey:@"tracks" error:nil] == AVKeyValueStatusLoaded) {
       NSArray* tracks = [asset tracksWithMediaType:AVMediaTypeVideo];
@@ -230,7 +238,6 @@ static inline CGFloat radiansToDegrees(CGFloat radians) {
   _player.actionAtItemEnd = AVPlayerActionAtItemEndNone;
 
   [self createVideoOutputAndDisplayLink:frameUpdater];
-
   [self addObservers:item];
 
   [asset loadValuesAsynchronouslyForKeys:@[ @"tracks" ] completionHandler:assetCompletionHandler];
