@@ -8,7 +8,12 @@ homepage: https://github.com/flutter/plugins/tree/master/packages/camera/camera
 dependencies:
   flutter:
     sdk: flutter
-  camera_platform_interface: ^1.5.0
+  # camera_platform_interface: ^1.5.0
+  camera_platform_interface:
+    git:
+      url: https://github.com/nt4f04und/plugins
+      path: packages/camera/camera_platform_interface
+      ref: freeze_buildable
   pedantic: ^1.8.0
   quiver: ^2.1.5
 
