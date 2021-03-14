@@ -35,9 +35,37 @@ int64_t FLTCMTimeToMillis(CMTime time) {
 }
 @end
 
+typedef void(^ObserverCallback)(AVPlayerItem* item);
+
+@interface FLTQueuePlayer : AVQueuePlayer
+@property(readonly, nonatomic) SEL addObservers;
+@property(readonly, nonatomic) SEL removeObservers;
+@end
+
+@implementation FLTQueuePlayer
+
+- (void)insertItem:(AVPlayerItem *)item
+         afterItem:(nullable AVPlayerItem *)afterItem {
+    if (item.outputs.count == 0) {
+        NSLog(@"Creating AVPlayerItemVideoOutput");
+        NSDictionary* pixBuffAttributes = @{
+          (id)kCVPixelBufferPixelFormatTypeKey : @(kCVPixelFormatType_32BGRA),
+          (id)kCVPixelBufferIOSurfacePropertiesKey : @{}
+        };
+        AVPlayerItemVideoOutput* videoOutput = [[AVPlayerItemVideoOutput alloc] initWithPixelBufferAttributes:pixBuffAttributes];
+        [item addOutput:videoOutput];
+    }
+    [super insertItem:item afterItem:afterItem];
+}
+
+@end
+
 @interface FLTVideoPlayer : NSObject <FlutterTexture, FlutterStreamHandler>
-@property(readonly, nonatomic) AVPlayer* player;
-@property(readonly, nonatomic) AVPlayerItemVideoOutput* videoOutput;
+@property(readonly, nonatomic) FLTQueuePlayer* player;
+@property(readonly, nonatomic) AVPlayerLooper* playerLooper API_AVAILABLE(ios(10.0));
+// template item that will be passed to playerLooper
+// not used for iOS < 10.0
+@property(readonly, nonatomic) AVPlayerItem* templateItem;
 @property(readonly, nonatomic) CADisplayLink* displayLink;
 @property(nonatomic) FlutterEventChannel* eventChannel;
 @property(nonatomic) FlutterEventSink eventSink;
@@ -96,13 +124,26 @@ static void* playbackBufferFullContext = &playbackBufferFullContext;
 
 - (void)itemDidPlayToEndTime:(NSNotification*)notification {
   if (_isLooping) {
-    AVPlayerItem* p = [notification object];
-    [p seekToTime:kCMTimeZero completionHandler:nil];
+      if (@available(iOS 10.0, *)) {
+        
+      } else {
+        AVPlayerItem* p = [notification object];
+        [p seekToTime:kCMTimeZero completionHandler:nil];
+      }
   } else {
     if (_eventSink) {
       _eventSink(@{@"event" : @"completed"});
     }
   }
+}
+
+- (void)removeObservers:(AVPlayerItem*)item {
+  [[_player currentItem] removeObserver:self forKeyPath:@"status" context:statusContext];
+  [[_player currentItem] removeObserver:self forKeyPath:@"loadedTimeRanges" context:timeRangeContext];
+  [[_player currentItem] removeObserver:self forKeyPath:@"playbackLikelyToKeepUp" context:playbackLikelyToKeepUpContext];
+  [[_player currentItem] removeObserver:self forKeyPath:@"playbackBufferEmpty" context:playbackBufferEmptyContext];
+  [[_player currentItem] removeObserver:self forKeyPath:@"playbackBufferFull" context:playbackBufferFullContext];
+  [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
 static inline CGFloat radiansToDegrees(CGFloat radians) {
@@ -112,7 +153,7 @@ static inline CGFloat radiansToDegrees(CGFloat radians) {
     // Convert -90 to 270 and -180 to 180
     return degrees + 360;
   }
-  // Output degrees in between [0, 360[
+  // Output degrees in between [0, 360]
   return degrees;
 };
 
@@ -147,19 +188,6 @@ static inline CGFloat radiansToDegrees(CGFloat radians) {
   videoComposition.frameDuration = CMTimeMake(1, 30);
 
   return videoComposition;
-}
-
-- (void)createVideoOutputAndDisplayLink:(FLTFrameUpdater*)frameUpdater {
-  NSDictionary* pixBuffAttributes = @{
-    (id)kCVPixelBufferPixelFormatTypeKey : @(kCVPixelFormatType_32BGRA),
-    (id)kCVPixelBufferIOSurfacePropertiesKey : @{}
-  };
-  _videoOutput = [[AVPlayerItemVideoOutput alloc] initWithPixelBufferAttributes:pixBuffAttributes];
-
-  _displayLink = [CADisplayLink displayLinkWithTarget:frameUpdater
-                                             selector:@selector(onDisplayLink:)];
-  [_displayLink addToRunLoop:[NSRunLoop currentRunLoop] forMode:NSRunLoopCommonModes];
-  _displayLink.paused = YES;
 }
 
 - (instancetype)initWithURL:(NSURL*)url frameUpdater:(FLTFrameUpdater*)frameUpdater {
@@ -226,13 +254,15 @@ static inline CGFloat radiansToDegrees(CGFloat radians) {
     }
   };
 
-  _player = [AVPlayer playerWithPlayerItem:item];
+  _templateItem = item;
+  _player = [[FLTQueuePlayer alloc] initWithPlayerItem:item];
   _player.actionAtItemEnd = AVPlayerActionAtItemEndNone;
 
-  [self createVideoOutputAndDisplayLink:frameUpdater];
+  _displayLink = [CADisplayLink displayLinkWithTarget:frameUpdater selector:@selector(onDisplayLink:)];
+  [_displayLink addToRunLoop:[NSRunLoop currentRunLoop] forMode:NSRunLoopCommonModes];
+  _displayLink.paused = YES;
 
   [self addObservers:item];
-
   [asset loadValuesAsynchronouslyForKeys:@[ @"tracks" ] completionHandler:assetCompletionHandler];
 
   return self;
@@ -267,7 +297,6 @@ static inline CGFloat radiansToDegrees(CGFloat radians) {
       case AVPlayerItemStatusUnknown:
         break;
       case AVPlayerItemStatusReadyToPlay:
-        [item addOutput:_videoOutput];
         [self sendInitialized];
         [self updatePlayingState];
         break;
@@ -353,6 +382,17 @@ static inline CGFloat radiansToDegrees(CGFloat radians) {
 
 - (void)setIsLooping:(bool)isLooping {
   _isLooping = isLooping;
+  if (@available(iOS 10.0, *)) {
+    if (!_isInitialized) {
+      return;
+    }
+    if (_isLooping) {
+      _playerLooper = [AVPlayerLooper playerLooperWithPlayer:_player templateItem:_templateItem];
+    } else {
+      [_playerLooper disableLooping];
+      _playerLooper = nil;
+    }
+  }
 }
 
 - (void)setVolume:(double)volume {
@@ -384,9 +424,10 @@ static inline CGFloat radiansToDegrees(CGFloat radians) {
 }
 
 - (CVPixelBufferRef)copyPixelBuffer {
-  CMTime outputItemTime = [_videoOutput itemTimeForHostTime:CACurrentMediaTime()];
-  if ([_videoOutput hasNewPixelBufferForItemTime:outputItemTime]) {
-    return [_videoOutput copyPixelBufferForItemTime:outputItemTime itemTimeForDisplay:NULL];
+  AVPlayerItemVideoOutput *videoOutput = (AVPlayerItemVideoOutput*) _player.currentItem.outputs.firstObject;
+  CMTime outputItemTime = [videoOutput itemTimeForHostTime:CACurrentMediaTime()];
+  if ([videoOutput hasNewPixelBufferForItemTime:outputItemTime]) {
+    return [videoOutput copyPixelBufferForItemTime:outputItemTime itemTimeForDisplay:NULL];
   } else {
     return NULL;
   }
@@ -421,21 +462,7 @@ static inline CGFloat radiansToDegrees(CGFloat radians) {
 - (void)disposeSansEventChannel {
   _disposed = true;
   [_displayLink invalidate];
-  [[_player currentItem] removeObserver:self forKeyPath:@"status" context:statusContext];
-  [[_player currentItem] removeObserver:self
-                             forKeyPath:@"loadedTimeRanges"
-                                context:timeRangeContext];
-  [[_player currentItem] removeObserver:self
-                             forKeyPath:@"playbackLikelyToKeepUp"
-                                context:playbackLikelyToKeepUpContext];
-  [[_player currentItem] removeObserver:self
-                             forKeyPath:@"playbackBufferEmpty"
-                                context:playbackBufferEmptyContext];
-  [[_player currentItem] removeObserver:self
-                             forKeyPath:@"playbackBufferFull"
-                                context:playbackBufferFullContext];
-  [_player replaceCurrentItemWithPlayerItem:nil];
-  [[NSNotificationCenter defaultCenter] removeObserver:self];
+  [_player removeAllItems];
 }
 
 - (void)dispose {
